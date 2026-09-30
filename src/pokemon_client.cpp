@@ -125,7 +125,16 @@ bool PokemonClient::fetchWantlist(std::vector<WantedCard> &out) {
       card.id = row["id"] | "";
       card.name = row["name"] | "";
       card.number = row["number"] | "";
-      card.imageUrl = row["image_small"] | "";
+      String imageSmall = row["image_small"] | "";
+      // The backend now proxies card art itself (a "/images/..." path) so
+      // it can be served over plain HTTP alongside the rest of the API,
+      // rather than the ESP32 negotiating its own HTTPS connection to the
+      // external image CDN -- that connection was the source of most of
+      // the SSL flakiness this device used to hit fetching art. A leading
+      // "/" means it's one of those relative paths; anything else (still
+      // seen for cards the backend hasn't mirrored yet) is already a full
+      // URL and is used as-is.
+      card.imageUrl = imageSmall.startsWith("/") ? _baseUrl + imageSmall : imageSmall;
       setIdByCardId[card.id] = row["set_id"] | "";
       cards.push_back(card);
     }

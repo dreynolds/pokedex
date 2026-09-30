@@ -148,10 +148,23 @@ bool prefetchArt(const String &imageUrl) {
   // has the same flakiness noted for the WebSocket connection in the
   // Jellyfin screen this was adapted from). Decoding from a complete
   // in-memory buffer has no such dependency.
-  WiFiClientSecure client;
-  client.setInsecure();
+  //
+  // The backend now proxies most card art itself over plain HTTP (see
+  // PokemonClient::fetchWantlist), so this is usually a plain WiFiClient;
+  // WiFiClientSecure (with cert validation skipped, as for the API calls)
+  // is only needed for cards the backend hasn't mirrored yet, still served
+  // straight from the external image CDN over HTTPS. Handing a
+  // WiFiClientSecure to a plain-HTTP server fails immediately with an
+  // "invalid SSL record" error -- the scheme has to pick the client.
+  WiFiClientSecure secureClient;
+  WiFiClient plainClient;
   HTTPClient http;
-  http.begin(client, imageUrl);
+  if (imageUrl.startsWith("https://")) {
+    secureClient.setInsecure();
+    http.begin(secureClient, imageUrl);
+  } else {
+    http.begin(plainClient, imageUrl);
+  }
   http.setTimeout(10000);
   http.setConnectTimeout(10000);
 
@@ -242,19 +255,26 @@ void drawCard(LGFX &gfx, const WantedCard &card) {
   gfx.fillScreen(COLOR_BG);
   drawArtPlaceholder(gfx);
 
+  const int centerX = ART_X + ART_W / 2;  // art already spans the full screen width, centered
+
+  gfx.setTextDatum(top_center);
+
   gfx.setTextColor(COLOR_NAME, COLOR_BG);
-  gfx.setTextSize(2);
+  gfx.setTextSize(1.6f);
+  int lineHeight = gfx.fontHeight() + 2;
   std::vector<String> nameLines = wrapText(gfx, card.name, TEXT_W, 2);
   int y = TEXT_Y;
   for (const String &line : nameLines) {
-    gfx.drawString(line, TEXT_X, y);
-    y += 20;
+    gfx.drawString(line, centerX, y);
+    y += lineHeight;
   }
 
   gfx.setTextColor(COLOR_ACCENT, COLOR_BG);
   gfx.setTextSize(1);
   String setLine = card.setName + " #" + card.number;
-  gfx.drawString(truncateToWidth(gfx, setLine, TEXT_W), TEXT_X, y + 6);
+  gfx.drawString(truncateToWidth(gfx, setLine, TEXT_W), centerX, y + 4);
+
+  gfx.setTextDatum(top_left);
 }
 
 }  // namespace ui
