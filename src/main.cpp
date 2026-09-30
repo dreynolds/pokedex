@@ -43,11 +43,12 @@ static volatile bool nextArtReady = false;
 // own stack more than once. The main loop never touches `gfx` directly
 // (other than the Wi-Fi status screens, gated the same way) since
 // LovyanGFX doesn't support two tasks drawing to the panel concurrently.
-enum class ArtJobType { kFetchAndDraw, kDrawBuffered, kPrefetch };
+enum class ArtJobType { kFetchAndDraw, kFetchAndDrawFirst, kDrawBuffered, kPrefetch };
 
 struct ArtJob {
   ArtJobType type;
-  char *url;  // heap, freed by the worker; unused for kDrawBuffered
+  char *url;         // heap, freed by the worker; unused for kDrawBuffered
+  WantedCard *card;  // heap, freed by the worker; only used for kFetchAndDrawFirst
 };
 
 static QueueHandle_t artJobQueue = nullptr;
@@ -103,6 +104,23 @@ static void artWorkerTaskFn(void *param) {
         }
         break;
       }
+      case ArtJobType::kFetchAndDrawFirst: {
+        // Fetches first, only touching the panel once art is ready (or has
+        // definitively failed) -- the boot-time "Loading" status screen
+        // stays up for this one instead of the usual placeholder-then-fill,
+        // since there's nothing prefetched yet to make that instant.
+        bool ok = false;
+        for (int attempt = 1; attempt <= kArtFetchAttempts && !ok; attempt++) {
+          ok = ui::prefetchArt(url);
+          if (!ok && attempt < kArtFetchAttempts) delay(300);
+        }
+        ui::drawCard(gfx, *job.card);
+        if (!ui::drawBufferedArt(gfx)) {
+          Serial.println("[main] initial card art fetch/decode failed, placeholder left up");
+        }
+        delete job.card;
+        break;
+      }
       case ArtJobType::kDrawBuffered:
         if (!ui::drawBufferedArt(gfx)) {
           Serial.println("[main] buffered card art decode failed, placeholder left up");
@@ -116,11 +134,12 @@ static void artWorkerTaskFn(void *param) {
   }
 }
 
-static void enqueueJob(ArtJobType type, const String &url = String()) {
+static void enqueueJob(ArtJobType type, const String &url = String(), WantedCard *card = nullptr) {
   artWorkerBusy = true;
   ArtJob job;
   job.type = type;
   job.url = url.length() > 0 ? strdup(url.c_str()) : nullptr;
+  job.card = card;
   xQueueSend(artJobQueue, &job, 0);
 }
 
@@ -144,10 +163,16 @@ static void maybeStartPrefetch() {
   enqueueJob(ArtJobType::kPrefetch, cachedCards[nextCardIndex].imageUrl);
 }
 
+// True once any card has actually been shown -- gates the one-time
+// loading-screen treatment in advanceCard() below.
+static bool haveShownFirstCard = false;
+
 // Swaps to a new card. If one was already prefetched in time, this is just
 // a fast local decode+draw of art that's already fully downloaded; only
-// falls back to a full (slower, placeholder-first) fetch when it wasn't
-// ready yet.
+// falls back to a full (slower) fetch when it wasn't ready yet -- which, at
+// boot, is every time, since nothing's had a chance to prefetch yet. That
+// very first card keeps the "Loading" status screen up until its art
+// arrives instead of showing the usual placeholder-then-fill.
 static void advanceCard() {
   if (cachedCards.empty()) return;
 
@@ -161,9 +186,16 @@ static void advanceCard() {
     nextCardIndex = -1;
     nextArtReady = false;
     currentCardIndex = pickCardIndex(currentCardIndex);
-    ui::drawCard(gfx, cachedCards[currentCardIndex]);
-    enqueueJob(ArtJobType::kFetchAndDraw, cachedCards[currentCardIndex].imageUrl);
+    const WantedCard &card = cachedCards[currentCardIndex];
+    if (!haveShownFirstCard) {
+      ui::drawStatus(gfx, "Loading", "Fetching card art...");
+      enqueueJob(ArtJobType::kFetchAndDrawFirst, card.imageUrl, new WantedCard(card));
+    } else {
+      ui::drawCard(gfx, card);
+      enqueueJob(ArtJobType::kFetchAndDraw, card.imageUrl);
+    }
   }
+  haveShownFirstCard = true;
 }
 
 static void refreshWantlist() {
